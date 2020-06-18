@@ -237,6 +237,13 @@ function loadDynamicLibrary(lib, flags) {
     return createLibModule(loadLibData(lib));
   }
 
+#if WASM_BACKEND
+  function asmjsMangle(x) {
+      var unmangledSymbols = {{{ buildStringArray(WASM_FUNCTIONS_THAT_ARE_NOT_NAME_MANGLED) }}};
+      return x.indexOf('dynCall_') == 0 || unmangledSymbols.indexOf(x) != -1 ? x : '_' + x;
+  }
+#endif
+
   // Module.symbols <- libModule.symbols (flags.global handler)
   function mergeLibSymbols(libModule) {
     // add symbols into global namespace TODO: weak linking etc.
@@ -252,7 +259,7 @@ function loadDynamicLibrary(lib, flags) {
 
       var module_sym = sym;
 #if WASM_BACKEND
-      module_sym = '_' + sym;
+      module_sym = asmjsMangle(sym);
 #else
       // Module of SIDE_MODULE has not only the symbols (which should be copied)
       // but also others (print*, asmGlobal*, FUNCTION_TABLE_**, NAMED_GLOBALS, and so on).
@@ -261,7 +268,7 @@ function loadDynamicLibrary(lib, flags) {
       // When the symbol (which should be copied) is variable, Module.* 's type becomes number.
       // Except for the symbol prefix (_), there is no difference in the symbols (which should be copied) and others.
       // So this just copies over compiled symbols (which start with _).
-      if (sym[0] !== '_') {
+      if (!sym.startsWith('dynCall_') && sym[0] !== '_') {
         continue;
       }
 #endif
@@ -336,6 +343,24 @@ function relocateExports(exports, memoryBase, tableBase, moduleLocal) {
   }
   return relocated;
 }
+
+#if RELOCATABLE
+// Dynmamic version of shared.py:make_invoke.  This is needed for invokes
+// that originate from side modules since these are not known at JS
+// generation time.
+function createInvokeFunction(sig) {
+  return function() {
+    var sp = stackSave();
+    try {
+      return Module['dynCall_' + sig].apply(null, arguments);
+    } catch(e) {
+      stackRestore(sp);
+      if (e !== e+0 && e !== 'longjmp') throw e;
+      _setThrew(1, 0);
+    }
+  }
+}
+#endif
 
 // Loads a side module from binary data
 function loadWebAssemblyModule(binary, flags) {
@@ -433,12 +458,19 @@ function loadWebAssemblyModule(binary, flags) {
       var resolved = Module["asm"][sym];
       if (!resolved) {
 #if WASM_BACKEND
-        sym = '_' + sym;
+        var mangled = '_' + sym;
+#else
+        var mangled = sym;
 #endif
-        resolved = Module[sym];
+        resolved = Module[mangled];
         if (!resolved) {
-          resolved = moduleLocal[sym];
+          resolved = moduleLocal[mangled];
         }
+#if RELOCATABLE
+        if (!resolved && sym.startsWith('invoke_')) {
+          resolved = createInvokeFunction(sym.split('_')[1]);
+        }
+#endif
 #if ASSERTIONS
         assert(resolved, 'missing linked ' + type + ' `' + sym + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
 #endif
@@ -505,13 +537,6 @@ function loadWebAssemblyModule(binary, flags) {
             }
             return fp;
           };
-        }
-        if (prop.startsWith('invoke_')) {
-          // A missing invoke, i.e., an invoke for a function type
-          // present in the dynamic library but not in the main JS,
-          // and the dynamic library cannot provide JS for it. Use
-          // the generic "X" invoke for it.
-          return obj[prop] = invoke_X;
         }
         // otherwise this is regular function import - call it indirectly
         return obj[prop] = function() {
