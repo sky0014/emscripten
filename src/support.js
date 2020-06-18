@@ -103,6 +103,15 @@ function fetchBinary(url) {
   });
 }
 
+function asmjsMangle(x) {
+#if WASM_BACKEND
+  var unmangledSymbols = {{{ buildStringArray(WASM_FUNCTIONS_THAT_ARE_NOT_NAME_MANGLED) }}};
+  return x.indexOf('dynCall_') == 0 || unmangledSymbols.indexOf(x) != -1 ? x : '_' + x;
+#else
+  return x;
+#endif
+}
+
 // loadDynamicLibrary loads dynamic library @ lib URL / path and returns handle for loaded DSO.
 //
 // Several flags affect the loading:
@@ -237,13 +246,6 @@ function loadDynamicLibrary(lib, flags) {
     return createLibModule(loadLibData(lib));
   }
 
-#if WASM_BACKEND
-  function asmjsMangle(x) {
-      var unmangledSymbols = {{{ buildStringArray(WASM_FUNCTIONS_THAT_ARE_NOT_NAME_MANGLED) }}};
-      return x.indexOf('dynCall_') == 0 || unmangledSymbols.indexOf(x) != -1 ? x : '_' + x;
-  }
-#endif
-
   // Module.symbols <- libModule.symbols (flags.global handler)
   function mergeLibSymbols(libModule) {
     // add symbols into global namespace TODO: weak linking etc.
@@ -257,10 +259,8 @@ function loadDynamicLibrary(lib, flags) {
       //
       // We should copy the symbols (which include methods and variables) from SIDE_MODULE to MAIN_MODULE.
 
-      var module_sym = sym;
-#if WASM_BACKEND
-      module_sym = asmjsMangle(sym);
-#else
+      var module_sym = asmjsMangle(sym);
+#if !WASM_BACKEND
       // Module of SIDE_MODULE has not only the symbols (which should be copied)
       // but also others (print*, asmGlobal*, FUNCTION_TABLE_**, NAMED_GLOBALS, and so on).
       //
@@ -457,11 +457,7 @@ function loadWebAssemblyModule(binary, flags) {
 
       var resolved = Module["asm"][sym];
       if (!resolved) {
-#if WASM_BACKEND
-        var mangled = '_' + sym;
-#else
-        var mangled = sym;
-#endif
+        var mangled = asmjsMangle(sym);
         resolved = Module[mangled];
         if (!resolved) {
           resolved = moduleLocal[mangled];
